@@ -4,6 +4,7 @@ use tokio::fs::{OpenOptions, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncBufReadExt, BufReader};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, Sender};
 
 #[derive(Debug)]
 enum Command {
@@ -27,22 +28,30 @@ async fn main() {
 
     let db: Db = Arc::new(Mutex::new(initial_data));
 
+    let (tx, mut rx) = mpsc::channel::<String>(100);
+
     let aof_file = OpenOptions::new()
         .append(true)
         .create(true)
         .open(file_name)
         .await
-        .expect("Failed to open AOF file");
+        .unwrap();
 
-    let aof = Arc::new(Mutex::new(aof_file));
+    tokio::spawn(async move {
+        let mut file = aof_file;
+        while let Some(log_entry) = rx.recv().await {
+            let _ = file.write_all(log_entry.as_bytes()).await;
+            let _ = file.sync_all().await;
+        }
+    });
     
     loop {
         let (socket, _) = listener.accept().await.unwrap();
         let db_clone = Arc::clone(&db);
-        let aof_clone = Arc::clone(&aof);
+        let tx_clone = tx.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, db_clone, aof_clone).await {
+            if let Err(e) = handle_client(socket, db_clone, tx_clone).await {
                 eprintln!("Error handling client: {}", e);
             }
         });
@@ -59,8 +68,8 @@ async fn replay_event_log(filename: &str) -> HashMap<String, String> {
         while reader.read_line(&mut line).await.unwrap() > 0 {
             let input = line.trim();
             if !input.is_empty() {
-                let parts: Vec<&str> = input.split_whitespace().collect();
-                if parts.get(0) == Some(&"SET") && parts.len() == 3 {
+                let parts: Vec<&str> = input.splitn(3, ' ').collect();
+                if parts.get(0) == Some(&"SET") && parts.len() >= 3 {
                     initial_data.insert(parts[1].to_string(), parts[2].to_string());
                 }
             }
@@ -70,7 +79,7 @@ async fn replay_event_log(filename: &str) -> HashMap<String, String> {
     initial_data
 }
 
-async fn handle_client(mut stream: TcpStream, db: Db, aof: Arc<Mutex<File>>) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_client(mut stream: TcpStream, db: Db, tx: Sender<String>) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0; 1024];
 
     loop {
@@ -86,7 +95,8 @@ async fn handle_client(mut stream: TcpStream, db: Db, aof: Arc<Mutex<File>>) -> 
                     let mut data = db.lock().await;
                     data.insert(key.clone(), value.clone());
 
-                    let _ = log_into_file(Arc::clone(&aof), key.clone(), value.clone()).await;
+                    let log_entry = format!("SET {} {}\n", key, value);
+                    tx.send(log_entry).await.map_err(|e| e.to_string())?;
 
                     stream.write_all(b"+OK\r\n").await?;
                 }
@@ -108,14 +118,6 @@ async fn handle_client(mut stream: TcpStream, db: Db, aof: Arc<Mutex<File>>) -> 
 
         }
     }
-}
-
-async fn log_into_file(aof: Arc<Mutex<File>>, key: String, value: String) -> tokio::io::Result<()> {
-    let mut file = aof.lock().await;
-    let log_entry = format!("SET {} {}\n", key, value);
-    file.write_all(log_entry.as_bytes()).await?;
-    file.sync_all().await?;
-    Ok(())
 }
 
 fn parse_resp_array(input: &[u8]) -> Command {

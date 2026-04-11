@@ -1,0 +1,8 @@
+[package]
+name = "rust_chip8"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sdl2 = "0.36"
+rand = "0.8"

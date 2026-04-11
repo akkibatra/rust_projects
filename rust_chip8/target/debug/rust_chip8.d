@@ -1,1 +1,0 @@
-/Volumes/MacExSSD/WorkspaceEx/rust_projects/rust_chip8/target/debug/rust_chip8: /Volumes/MacExSSD/WorkspaceEx/rust_projects/rust_chip8/src/cpu.rs /Volumes/MacExSSD/WorkspaceEx/rust_projects/rust_chip8/src/main.rs

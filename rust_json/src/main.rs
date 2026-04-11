@@ -1,19 +1,17 @@
 use core::f64;
 use std::collections::HashMap;
-use std::iter::Peekable;
-use std::str::Chars;
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum JsonValue {
+pub enum JsonValue<'a> {
     Null,
     Boolean(bool),
     Number(f64),
-    String(String),
-    Array(Vec<JsonValue>),
-    Object(std::collections::HashMap<String, JsonValue>),
+    String(&'a str),
+    Array(Vec<JsonValue<'a>>),
+    Object(std::collections::HashMap<&'a str, JsonValue<'a>>),
 }
 
-impl JsonValue {
+impl<'a> JsonValue<'a> {
     pub fn stringify(&self) -> String {
         match self {
             JsonValue::Null => "null".to_string(),
@@ -132,31 +130,33 @@ impl JsonValue {
 }
 
 #[derive(Debug, Clone)]
-pub enum Token {
+pub enum Token<'a> {
     LeftBrace, // {
     RightBrace, // }
     LeftBracket, // [
     RightBracket, // ]
     Colon, // :
     Comma, // ,
-    String(String),
+    String(&'a str),
     Number(f64),
     Boolean(bool),
     Null,
 }
 
 pub struct Lexer<'a> {
-    chars: Peekable<Chars<'a>>,
+    input: &'a str,
+    cursor: usize,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Self {
-            chars: input.chars().peekable()
+            input,
+            cursor: 0,
         }
     }
 
-    pub fn tokenize(&mut self) -> Vec<Token> {
+    pub fn tokenize(&mut self) -> Vec<Token<'a>> {
         let mut tokens = Vec::new();
 
         while let Some(token) = self.new_token() {
@@ -166,10 +166,20 @@ impl<'a> Lexer<'a> {
         tokens
     }
 
-    fn new_token(&mut self) -> Option<Token> {
+    fn peek(&mut self) -> Option<char> {
+        self.input.get(self.cursor..)?.chars().next()
+    }
+
+    fn next_char(&mut self) -> Option<char> {
+        let c = self.peek();
+        self.cursor += 1;
+        c
+    }
+
+    fn new_token(&mut self) -> Option<Token<'a>> {
         self.consume_whitespace();
 
-        let c = self.chars.next()?;
+        let c = self.next_char()?;
 
         match c {
             '{' => Some(Token::LeftBrace),
@@ -188,29 +198,29 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_whitespace(&mut self) {
-        while let Some(&c) = self.chars.peek() {
-            if c.is_whitespace() { self.chars.next(); }
+        while let Some(c) = self.peek() {
+            if c.is_whitespace() { self.next_char(); }
             else { break; }
         }
     }
 
-    fn lex_keyword(&mut self, keyword: &str, token: Token) -> Option<Token> {
+    fn lex_keyword(&mut self, keyword: &str, token: Token<'a>) -> Option<Token<'a>> {
         for expected in keyword.chars().skip(1) {
-            if self.chars.next()? != expected {
+            if self.next_char()? != expected {
                 return None; 
             }
         }
         Some(token)
     }
 
-    fn lex_number(&mut self, first_char: char) -> Option<Token> {
+    fn lex_number(&mut self, first_char: char) -> Option<Token<'a>> {
         let mut number_str = String::new();
         number_str.push(first_char);
 
-        while let Some(&c) = self.chars.peek() {
+        while let Some(c) = self.peek() {
             match c {
                 '0'..='9' | '.' | 'e' | 'E' | '+' | '-' => {
-                    number_str.push(self.chars.next().unwrap());
+                    number_str.push(self.next_char().unwrap());
                 }
                 _ => break,
             }
@@ -222,31 +232,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn lex_string(&mut self) -> Option<Token> {
-        let mut string = String::new();
-        let mut escaped = false;
+    fn lex_string(&mut self) -> Option<Token<'a>> {
+        let start = self.cursor;
 
-        while let Some(c) = self.chars.next() {
-            if escaped {
-                match c {
-                    '"' => string.push('"'),
-                    '\\' => string.push('\\'),
-                    '/' => string.push('/'),
-                    'b' => string.push('\x08'),
-                    'f' => string.push('\x0c'),
-                    'n' => string.push('\n'),
-                    'r' => string.push('\r'),
-                    't' => string.push('\t'),
-                    _ => string.push(c)
-                }
-                escaped = false;
-            } else {
-                match c {
-                    '\\' => escaped = true,
-                    '"' => return Some(Token::String(string)),
-                    _ => string.push(c)
-                }
+        while let Some(c) = self.peek() {
+            if c == '"' {
+                let end = self.cursor;
+                self.next_char();
+
+                return Some(Token::String(&self.input[start..end]));
             }
+            self.next_char();
         }
 
         None
@@ -272,33 +268,34 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-pub struct Parser {
-    tokens: Vec<Token>,
+pub struct Parser<'a> {
+    tokens: Vec<Token<'a>>,
     cursor: usize,
 }
 
-impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+impl<'a> Parser<'a> {
+    pub fn new(tokens: Vec<Token<'a>>) -> Self {
         Self { tokens, cursor: 0}
     }
 
-    pub fn parse(&mut self) -> Result<JsonValue, ParseError> {
+    pub fn parse(&mut self) -> Result<JsonValue<'a>, ParseError> {
         let token = self.advance()
             .cloned()
             .ok_or(ParseError::UnexpectedEOF)?;
+        let pos = self.cursor;
 
         match token {
             Token::Null => Ok(JsonValue::Null),
             Token::Boolean(b) => Ok(JsonValue::Boolean(b)),
             Token::Number(f) => Ok(JsonValue::Number(f)),
-            Token::String(s) => Ok(JsonValue::String(s.clone())),
+            Token::String(s) => Ok(JsonValue::String(s)),
             Token::LeftBracket => self.parse_array(),
             Token::LeftBrace => self.parse_object(),
-            _ => Err(ParseError::UnexpectedToken(format!("{:?}", token), self.cursor))
+            _ => Err(ParseError::UnexpectedToken(format!("{:?}", token), pos))
         }
     }
 
-    fn parse_array(&mut self) -> Result<JsonValue, ParseError> {
+    fn parse_array(&mut self) -> Result<JsonValue<'a>, ParseError> {
         let mut array = Vec::new();
 
         if let Some(Token::RightBracket) = self.peek() {
@@ -321,7 +318,7 @@ impl Parser {
         Ok(JsonValue::Array(array))
     }
 
-    fn parse_object(&mut self) -> Result<JsonValue, ParseError> {
+    fn parse_object(&mut self) -> Result<JsonValue<'a>, ParseError> {
         let mut object = HashMap::new();
 
         if let Some(Token::RightBrace) = self.peek() {
@@ -332,7 +329,7 @@ impl Parser {
         loop {
             // key
             let key = match self.advance() {
-                Some(Token::String(s)) => s.clone(),
+                Some(Token::String(s)) => *s,
                 Some(t) => return Err(ParseError::UnexpectedToken(format!("{:?}", t), self.cursor)),
                 None => return Err(ParseError::UnexpectedEOF),
             };
@@ -358,11 +355,11 @@ impl Parser {
         Ok(JsonValue::Object(object))
     }
 
-    fn peek(&mut self) -> Option<&Token> {
+    fn peek(&mut self) -> Option<&Token<'a>> {
         self.tokens.get(self.cursor)
     }
 
-    fn advance(&mut self) -> Option<&Token> {
+    fn advance(&mut self) -> Option<&Token<'a>> {
         let token = self.tokens.get(self.cursor);
         self.cursor += 1;
         token
